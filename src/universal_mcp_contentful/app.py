@@ -1,68 +1,88 @@
 from typing import Any, Dict, List, Optional
 
-from gql import Client as GraphQLClient
 from universal_mcp.applications import GraphQLApplication
 from universal_mcp.integrations import Integration
 from loguru import logger
 
 class ContentfulApp(GraphQLApplication):
-    """
-    Application for interacting with the Contentful GraphQL Content API.
-
-    This app allows fetching entries and assets from a Contentful space.
-    It requires an integration providing 'space_id' and 'access_token'
-    in its credentials. 'environment_id' (defaults to 'master') and
-    'is_eu_customer' (defaults to False) can also be provided.
-    """
-
     def __init__(
-        self, integration: Optional[Integration] = None, client: Optional[GraphQLClient] = None, **kwargs: Any,) -> None:
+        self, integration: Optional[Integration] = None, **kwargs: Any,
+    ) -> None:
         """
         Initialize the Contentful application.
 
         Args:
-            integration: Integration configuration providing credentials.
+            integration: Optional Integration configuration providing credentials.
                          Expected credentials:
                          - 'space_id' (str): The Contentful space ID.
                          - 'access_token' (str): The Content Delivery API or Content Preview API access token.
+                         - 'api_key' (str, optional): Alternative for 'access_token'.
                          - 'environment_id' (str, optional): The environment ID (defaults to "master").
                          - 'is_eu_customer' (bool, optional): Set to True if using Contentful's EU data center (defaults to False).
-            client: Optional pre-configured GraphQLClient instance.
             **kwargs: Additional keyword arguments passed to the base application.
         """
+        # Initialize Contentful-specific attributes to defaults first.
+        # These will be updated if an integration with valid credentials is provided.
+        self.space_id: Optional[str] = None
+        self.environment_id: str = "master"
+        self._access_token: Optional[str] = None 
+        
+        # This variable will hold the base_url to be passed to the superclass constructor.
+        # It will be a functional URL if configuration is correct, or a placeholder otherwise.
+        calculated_base_url_for_super: str
+
         if not integration:
-            raise ValueError(
-                "Integration is required for ContentfulApp to get credentials "
-                "(space_id, access_token)."
+            logger.error(
+                "Contentful integration not configured. Required credentials (space_id, access_token) "
+                "are missing. API calls will likely fail."
             )
+            # GraphQLApplication's __init__ expects a string for base_url.
+            calculated_base_url_for_super = "http://mock.contentful/graphql/no-integration-provided"
+        else:
+            credentials = integration.get_credentials()
+            
+            # Set instance attributes from credentials. These are used to build the base_url.
+            self.space_id = credentials.get("space_id")
+            self._access_token = credentials.get("access_token") or credentials.get("api_key")
+            self.environment_id = credentials.get("environment_id", "master")
+            is_eu_customer = credentials.get("is_eu_customer", False)
 
-        credentials = integration.get_credentials()
-        space_id = credentials.get("space_id")
-        environment_id = credentials.get("environment_id", "master")
-        is_eu_customer = credentials.get("is_eu_customer", False)
+            if not self.space_id:
+                logger.error(
+                    "Contentful 'space_id' not found in integration credentials. "
+                    "Base URL cannot be constructed, and API calls will fail."
+                )
+                calculated_base_url_for_super = "http://mock.contentful/graphql/missing-space-id"
+            else:
+                # Construct the actual base_url since space_id is available
+                contentful_api_domain = (
+                    "graphql.eu.contentful.com"
+                    if is_eu_customer
+                    else "graphql.contentful.com"
+                )
+                calculated_base_url_for_super = f"https://{contentful_api_domain}/content/v1/spaces/{self.space_id}/environments/{self.environment_id}"
+            
+            if not self._access_token:
+                logger.warning(
+                    "Contentful 'access_token' or 'api_key' not found in integration credentials. "
+                    "API calls may fail due to missing authentication."
+                )
+        
+        # Call the superclass __init__ with the determined base_url.
+        # GraphQLApplication's __init__ will store this as self.base_url.
+        # It also stores the integration object as self.integration.
+        super().__init__(name="contentful", base_url=calculated_base_url_for_super, integration=integration, **kwargs)
 
-        if not space_id:
-            raise ValueError(
-                "Contentful 'space_id' must be provided in integration credentials."
-            )
-        if not credentials.get("access_token") and not credentials.get("api_key"):
-            logger.warning(
-                "Contentful 'access_token' or 'api_key' not found in integration credentials. "
-                "API calls may fail due to missing authentication."
-            )
+        # Instance attributes like self.space_id, self.environment_id, self._access_token are already set.
+        # self.base_url and self.integration are set by the superclass constructor.
 
-        base_domain = (
-            "graphql.eu.contentful.com"
-            if is_eu_customer
-            else "graphql.contentful.com"
+        logger.info(
+            f"ContentfulApp initialized for space '{self.space_id if self.space_id else 'Not Set'}', "
+            f"environment '{self.environment_id}'. "
+            # self.base_url is guaranteed to be set by GraphQLApplication's __init__
+            f"Base URL: {self.base_url}" 
         )
-        _base_url = f"https://{base_domain}/content/v1/spaces/{space_id}/environments/{environment_id}"
-
-        super().__init__(name="contentful", base_url=_base_url, integration=integration, client=client, **kwargs,)
-        self.space_id: str = space_id
-        self.environment_id: str = environment_id
-        logger.info(f"ContentfulApp initialized for space '{space_id}', environment '{environment_id}'")
-
+        
     @staticmethod
     def _to_camel_case(s: str) -> str:
         """Converts a string to camelCase based on Contentful's typical ID to GraphQL name conversion."""
